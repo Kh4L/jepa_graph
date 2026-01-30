@@ -7,8 +7,7 @@ G-Retriever (https://arxiv.org/abs/2402.07630) combines:
 - Subgraph retrieval for context
 
 This module provides:
-- JEPA-pretrained GNN as the graph encoder
-- Integration with PyG's GRetriever
+- JEPA-pretrained GNN as the graph encoder for PyG's GRetriever
 - Training pipeline aligned with the baseline
 """
 
@@ -58,6 +57,8 @@ def get_loss(
     """
     Compute loss for G-Retriever model.
     
+    Matches baseline: https://github.com/puririshi98/gretriever-stark-prime
+    
     Args:
         model: GRetriever or LLM model
         batch: Batch of data
@@ -68,7 +69,7 @@ def get_loss(
     """
     if model_type == 'llm':
         return model(batch.question, batch.label, batch.desc)
-    else:  # GNN+LLM
+    else:  # GNN+LLM (GRetriever)
         return model(
             batch.question,
             batch.x,
@@ -116,181 +117,137 @@ def inference_step(
         )
 
 
-class JEPAGRetriever(nn.Module):
+def create_gretriever_with_jepa_encoder(
+    jepa_encoder: nn.Module,
+    llm_model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    sys_prompt: str = (
+        "You are an expert assistant that answers questions "
+        "based on the provided knowledge graph context. "
+        "Give concise answers without explanation."
+    ),
+) -> nn.Module:
     """
-    G-Retriever with JEPA-pretrained GNN encoder.
+    Create PyG's GRetriever model using a JEPA-pretrained GNN encoder.
     
-    Combines:
-    - JEPA-pretrained graph encoder (frozen or finetuned)
-    - LLM for text generation
-    - Graph-text fusion
+    This is the recommended way to use JEPA with G-Retriever - it uses
+    the actual PyG GRetriever class.
+    
+    Args:
+        jepa_encoder: JEPA-pretrained graph encoder
+        llm_model_name: HuggingFace model name for LLM
+        sys_prompt: System prompt for LLM
+        
+    Returns:
+        GRetriever model with JEPA encoder as the GNN component
     """
-    
-    def __init__(
-        self,
-        gnn_encoder: nn.Module,
-        llm: Optional[nn.Module] = None,
-        llm_model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        freeze_gnn: bool = False,
-        gnn_to_llm_proj: Optional[nn.Module] = None,
-        sys_prompt: str = (
-            "You are a helpful assistant that answers questions "
-            "based on the provided knowledge graph context. "
-            "Give concise answers."
-        ),
-    ):
-        """
-        Args:
-            gnn_encoder: JEPA-pretrained graph encoder
-            llm: Pre-initialized LLM (optional)
-            llm_model_name: HuggingFace model name for LLM
-            freeze_gnn: Whether to freeze GNN weights
-            gnn_to_llm_proj: Projection from GNN dim to LLM dim
-            sys_prompt: System prompt for LLM
-        """
-        super().__init__()
-        
-        self.gnn_encoder = gnn_encoder
-        self.freeze_gnn = freeze_gnn
-        
-        if freeze_gnn:
-            for param in self.gnn_encoder.parameters():
-                param.requires_grad = False
-        
-        # Initialize LLM if not provided
-        if llm is None:
-            try:
-                from torch_geometric.nn.models import LLM
-                self.llm = LLM(model_name=llm_model_name, sys_prompt=sys_prompt)
-            except ImportError:
-                print("PyG LLM not available. Install with: pip install torch_geometric[llm]")
-                self.llm = None
-        else:
-            self.llm = llm
-        
-        # Projection layer
-        if gnn_to_llm_proj is not None:
-            self.proj = gnn_to_llm_proj
-        else:
-            # Will be initialized later when we know dimensions
-            self.proj = None
-        
-        self.sys_prompt = sys_prompt
-        self.seq_length_stats = []
-    
-    def encode_graph(
-        self,
-        x: Tensor,
-        edge_index: Tensor,
-        batch: Optional[Tensor] = None,
-        edge_attr: Optional[Tensor] = None,
-    ) -> Tensor:
-        """Encode graph using JEPA-pretrained GNN."""
-        node_emb, graph_emb = self.gnn_encoder(
-            x=x,
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            batch=batch,
-            return_node_embeddings=True,
+    try:
+        from torch_geometric.nn.models import GRetriever, LLM
+    except ImportError:
+        raise ImportError(
+            "PyG GRetriever not available. Install with:\n"
+            "pip install torch_geometric[llm]\n"
+            "pip install transformers accelerate sentencepiece"
         )
-        return node_emb
     
-    def forward(
-        self,
-        question: List[str],
-        x: Tensor,
-        edge_index: Tensor,
-        batch: Tensor,
-        label: List[str],
-        edge_attr: Optional[Tensor] = None,
-        desc: str = "",
-    ) -> Tensor:
-        """
-        Forward pass for training.
-        
-        Args:
-            question: List of question strings
-            x: Node features [num_nodes, node_dim]
-            edge_index: Edge connectivity [2, num_edges]
-            batch: Batch assignment [num_nodes]
-            label: List of answer strings
-            edge_attr: Edge features (optional)
-            desc: Graph description (optional)
-            
-        Returns:
-            Loss tensor
-        """
-        # Encode graph
-        graph_emb = self.encode_graph(x, edge_index, batch, edge_attr)
-        
-        # Use PyG's GRetriever interface if available
-        if self.llm is not None and hasattr(self.llm, 'forward'):
-            # Project graph embeddings if needed
-            if self.proj is not None:
-                graph_emb = self.proj(graph_emb)
-            
-            # Forward through LLM
-            return self.llm(question, label, graph_emb, batch)
-        else:
-            # Fallback: return dummy loss for testing
-            return torch.tensor(0.0, requires_grad=True)
+    # Create LLM component
+    llm = LLM(model_name=llm_model_name, sys_prompt=sys_prompt)
     
-    def inference(
-        self,
-        question: List[str],
-        x: Tensor,
-        edge_index: Tensor,
-        batch: Tensor,
-        edge_attr: Optional[Tensor] = None,
-        desc: str = "",
-        max_out_tokens: int = 128,
-    ) -> List[str]:
-        """
-        Generate answers for questions.
+    # Create GRetriever with JEPA encoder as the GNN
+    model = GRetriever(llm=llm, gnn=jepa_encoder)
+    
+    return model
+
+
+def load_jepa_encoder(
+    checkpoint_path: str,
+    encoder_config: Dict[str, Any],
+    device: str = "cuda",
+) -> nn.Module:
+    """
+    Load a JEPA-pretrained encoder from checkpoint.
+    
+    Args:
+        checkpoint_path: Path to saved encoder weights
+        encoder_config: Configuration dict for encoder architecture
+        device: Device to load to
         
-        Args:
-            question: List of question strings
-            x: Node features
-            edge_index: Edge connectivity
-            batch: Batch assignment
-            edge_attr: Edge features
-            desc: Graph description
-            max_out_tokens: Maximum output tokens
-            
-        Returns:
-            List of generated answer strings
-        """
-        # Encode graph
-        graph_emb = self.encode_graph(x, edge_index, batch, edge_attr)
+    Returns:
+        Loaded encoder module
+    """
+    from jepa_graph.models.encoders import GraphEncoder
+    
+    encoder = GraphEncoder(
+        in_channels=encoder_config['in_channels'],
+        hidden_channels=encoder_config['hidden_channels'],
+        out_channels=encoder_config['out_channels'],
+        num_layers=encoder_config.get('num_layers', 3),
+        gnn_type=encoder_config.get('gnn_type', 'gat'),
+        heads=encoder_config.get('heads', 4),
+        dropout=encoder_config.get('dropout', 0.1),
+    )
+    
+    state_dict = torch.load(checkpoint_path, map_location='cpu')
+    encoder.load_state_dict(state_dict)
+    print(f"Loaded JEPA encoder from {checkpoint_path}")
+    
+    return encoder.to(device)
+
+
+def create_gretriever_from_jepa(
+    jepa_encoder_path: str,
+    encoder_config: Dict[str, Any],
+    llm_model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    freeze_gnn: bool = False,
+    device: str = "cuda",
+) -> nn.Module:
+    """
+    Create G-Retriever using a saved JEPA-pretrained encoder.
+    
+    This loads the encoder and creates a full GRetriever model.
+    
+    Args:
+        jepa_encoder_path: Path to saved encoder weights
+        encoder_config: Config dict for encoder architecture
+        llm_model_name: LLM model name
+        freeze_gnn: Whether to freeze GNN weights during finetuning
+        device: Device
         
-        if self.proj is not None:
-            graph_emb = self.proj(graph_emb)
-        
-        if self.llm is not None and hasattr(self.llm, 'inference'):
-            return self.llm.inference(
-                question,
-                graph_emb,
-                batch,
-                max_out_tokens=max_out_tokens,
-            )
-        else:
-            # Fallback
-            return [f"[Answer for: {q}]" for q in question]
+    Returns:
+        GRetriever model ready for finetuning
+    """
+    # Load JEPA encoder
+    encoder = load_jepa_encoder(jepa_encoder_path, encoder_config, device)
+    
+    # Optionally freeze
+    if freeze_gnn:
+        for param in encoder.parameters():
+            param.requires_grad = False
+        print("GNN encoder weights frozen")
+    
+    # Create GRetriever
+    model = create_gretriever_with_jepa_encoder(
+        jepa_encoder=encoder,
+        llm_model_name=llm_model_name,
+    )
+    
+    return model.to(device)
 
 
 class GRetrieverTrainer:
     """
     Trainer for G-Retriever with JEPA-pretrained encoder.
     
-    Follows the training protocol from the baseline:
+    Follows the exact training protocol from the baseline:
+    https://github.com/puririshi98/gretriever-stark-prime
+    
     - Cosine LR with warmup
-    - Gradient clipping
-    - Mixed precision training
+    - Gradient clipping at 0.1
+    - AdamW with β=(0.9, 0.95)
     """
     
     def __init__(
         self,
-        model: JEPAGRetriever,
+        model: nn.Module,
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
         test_loader: Optional[DataLoader] = None,
@@ -300,6 +257,18 @@ class GRetrieverTrainer:
         accumulation_steps: int = 2,
         device: str = "cuda",
     ):
+        """
+        Args:
+            model: GRetriever model (from create_gretriever_from_jepa)
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            test_loader: Test data loader
+            lr: Learning rate
+            epochs: Number of training epochs
+            grad_clip: Gradient clipping value
+            accumulation_steps: Gradient accumulation steps
+            device: Device
+        """
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -310,17 +279,22 @@ class GRetrieverTrainer:
         self.accumulation_steps = accumulation_steps
         self.device = device
         
-        # Setup optimizer
+        # Setup optimizer (matches baseline exactly)
         params = [p for _, p in model.named_parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
             [{'params': params, 'lr': lr, 'weight_decay': 0.05}],
             betas=(0.9, 0.95),
         )
+        
+        self.num_oom_errors = 0
     
     def train(self) -> nn.Module:
-        """Run training loop."""
-        num_oom_errors = 0
+        """
+        Run training loop.
         
+        Returns:
+            Trained model
+        """
         for epoch in range(self.epochs):
             self.model.train()
             epoch_loss = 0
@@ -331,7 +305,7 @@ class GRetrieverTrainer:
             for step, batch in enumerate(loader):
                 self.optimizer.zero_grad()
                 
-                # Clear description to save memory
+                # Clear description to save memory (matches baseline)
                 if hasattr(batch, 'desc'):
                     batch.desc = ""
                 
@@ -344,6 +318,7 @@ class GRetrieverTrainer:
                         self.grad_clip,
                     )
                     
+                    # LR adjustment every accumulation_steps
                     if (step + 1) % self.accumulation_steps == 0:
                         adjust_learning_rate(
                             self.optimizer.param_groups[0],
@@ -355,22 +330,34 @@ class GRetrieverTrainer:
                     self.optimizer.step()
                     epoch_loss += float(loss.detach())
                     
+                    loader.set_postfix({'loss': f'{loss.item():.4f}'})
+                    
                 except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
-                    num_oom_errors += 1
-                    print(f"OOM error at step {step}")
+                    self.num_oom_errors += 1
+                    print(f"OOM error at step {step}, total: {self.num_oom_errors}")
             
+            # Print epoch stats
             train_loss = epoch_loss / len(self.train_loader)
             print(f"{epoch_str}, Train Loss: {train_loss:.4f}")
+            
+            # Sequence length stats (if available)
+            if hasattr(self.model, 'seq_length_stats') and self.model.seq_length_stats:
+                stats = self.model.seq_length_stats
+                print(f"  Seq len - avg: {sum(stats)/len(stats):.0f}, "
+                      f"min: {min(stats)}, max: {max(stats)}")
             
             # Validation
             if self.val_loader is not None:
                 val_loss = self._validate()
                 print(f"{epoch_str}, Val Loss: {val_loss:.4f}")
         
-        if num_oom_errors > 0:
-            print(f"Total OOM errors: {num_oom_errors}")
+        if self.num_oom_errors > 0:
+            print(f"Total OOM errors: {self.num_oom_errors} "
+                  f"({100*self.num_oom_errors/len(self.train_loader)/self.epochs:.1f}%)")
         
+        torch.cuda.empty_cache()
+        self.model.eval()
         return self.model
     
     @torch.no_grad()
@@ -385,11 +372,17 @@ class GRetrieverTrainer:
             loss = get_loss(self.model, batch)
             total_loss += loss.item()
         
+        self.model.train()
         return total_loss / len(self.val_loader)
     
     @torch.no_grad()
     def evaluate(self) -> List[Dict[str, Any]]:
-        """Run evaluation on test set."""
+        """
+        Run evaluation on test set.
+        
+        Returns:
+            List of evaluation outputs with pred, question, label
+        """
         if self.test_loader is None:
             raise ValueError("No test loader provided")
         
@@ -409,51 +402,3 @@ class GRetrieverTrainer:
             })
         
         return eval_output
-
-
-def create_gretriever_from_jepa(
-    jepa_encoder_path: str,
-    encoder_config: Dict[str, Any],
-    llm_model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
-    freeze_gnn: bool = False,
-    device: str = "cuda",
-) -> JEPAGRetriever:
-    """
-    Create G-Retriever using a JEPA-pretrained encoder.
-    
-    Args:
-        jepa_encoder_path: Path to saved encoder weights
-        encoder_config: Config dict for encoder architecture
-        llm_model_name: LLM model name
-        freeze_gnn: Whether to freeze GNN
-        device: Device
-        
-    Returns:
-        JEPAGRetriever model
-    """
-    from jepa_graph.models.encoders import GraphEncoder
-    
-    # Build encoder
-    encoder = GraphEncoder(
-        in_channels=encoder_config['in_channels'],
-        hidden_channels=encoder_config['hidden_channels'],
-        out_channels=encoder_config['out_channels'],
-        num_layers=encoder_config.get('num_layers', 3),
-        gnn_type=encoder_config.get('gnn_type', 'gat'),
-        heads=encoder_config.get('heads', 4),
-        dropout=encoder_config.get('dropout', 0.1),
-    )
-    
-    # Load pretrained weights
-    state_dict = torch.load(jepa_encoder_path, map_location='cpu')
-    encoder.load_state_dict(state_dict)
-    print(f"Loaded JEPA encoder from {jepa_encoder_path}")
-    
-    # Create G-Retriever
-    model = JEPAGRetriever(
-        gnn_encoder=encoder,
-        llm_model_name=llm_model_name,
-        freeze_gnn=freeze_gnn,
-    )
-    
-    return model.to(device)
