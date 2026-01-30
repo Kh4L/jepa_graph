@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jepa-graph"
+version = "0.1.0"
+description = "JEPA-style pretraining for Graph Neural Networks with GraphRAG integration"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "JEPA-Graph Team"}
+]
+keywords = ["jepa", "graph-neural-networks", "graphrag", "self-supervised-learning", "pytorch-geometric"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "torch-geometric>=2.4.0",
+    "torch-scatter>=2.1.0",
+    "torch-sparse>=0.6.0",
+    "transformers>=4.30.0",
+    "einops>=0.7.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "networkx>=3.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+    "wandb>=0.15.0",
+    "tqdm>=4.65.0",
+    "rich>=13.0.0",
+    "sentence-transformers>=2.2.0",
+    "accelerate>=0.20.0",
+    "sentencepiece>=0.1.99",
+    "pcst_fast>=1.0.0",
+]
+
+[project.optional-dependencies]
+stark = [
+    "stark-qa>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+notebooks = [
+    "jupyter>=1.0.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+]
+
+[project.scripts]
+jepa-train = "jepa_graph.training.train:main"
+jepa-eval = "jepa_graph.training.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
